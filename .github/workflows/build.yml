@@ -1,121 +1,114 @@
-name: Realme GT Neo6 Kernel Builder
-
+name: Build MKSU-SUSFS For Realme GT Neo6 (SM8650)
 on:
   workflow_dispatch:
-    inputs:
+   inputs:
+      CPUD:
+        description: "处理器代号"
+        required: true
+        default: 'sm8650'
       SUSFS_ENABLED:
-        description: "Enable SUSFS"
+        description: "添加 SUSFS"
+        required: true
         type: boolean
         default: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
+    env:
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
+    
     steps:
-    # ================== 空间优化 ==================
-    - name: 清理构建空间
-      uses: easimon/maximize-build-space@v2
-      with:
-        root-reserve-mb: 16384  # 16GB预留空间
-        swap-reserve-mb: 6144
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          
+      - name: Configure Git
+        run: |
+         git config --global user.name "build"
+         git config --global user.email "liw378721@gmail.com"
 
-    # ================== 源码获取 ==================
-    - name: 克隆内核源码
-      uses: actions/checkout@v4
-      with:
-        repository: Iconkop/realme_gtneo6-AndroidV-kernel-source
-        path: master
-        fetch-depth: 0  # 需要完整提交历史
+      - name: Install dependencies
+        run: |
+         sudo apt update && sudo apt upgrade -y
+         sudo apt install -y python3 git curl build-essential flex bison libssl-dev libelf-dev
+         sudo apt install -y gcc-aarch64-linux-gnu
 
-    # ================== 工具链配置 ==================
-    - name: 安装Clang工具链
-      run: |
-        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r450784d.tar.gz
-        mkdir -p clang && tar xzf clang-r450784d.tar.gz -C clang
-        echo "CLANG_PATH=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
+      - name: Clone kernel source
+        run: |
+         git clone --depth=1 --branch=master \
+           https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source.git kernel_src
 
-    # ================== 内核配置 ==================
-    - name: 生成内核配置
-      run: |
-        cd kernel
-        make O=out ARCH=arm64 defconfig  # 确认defconfig路径正确
-        
-        # 验证基地址配置
-        if ! grep -q "CONFIG_PHYSICAL_START=0x80080000" out/.config; then
-          sed -i 's/CONFIG_PHYSICAL_START=.*/CONFIG_PHYSICAL_START=0x80080000/' out/.config
-        fi
+      - name: Clean kernel source
+        run: |
+         cd kernel_src
+         make clean && make mrproper
+         find . -name "abi_gki_protected_exports_*" -delete || echo "No protected exports!"
+         sed -i 's/ -dirty//g' scripts/setlocalversion
 
-    # ================== KernelSU集成 ==================
-    - name: 集成KernelSU
-      run: |
-        cd kernel
-        # 使用官方集成脚本
-        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
-        
-        # 适配骁龙8s Gen3的DTS补丁
-        patch -p1 < drivers/kernelsu/patchs/qcom_sm8635.patch || true
+      - name: Set up MKSU
+        run: |
+         cd kernel_src
+         curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/refs/heads/main/kernel/setup.sh" | bash -
+         cd KernelSU
+         git revert -m 1 $(git log --grep="remove devpts hook" --pretty=format:"%h") -n || echo "Revert skipped"
+         KSU_VERSION=$(expr $(git rev-list --count HEAD) "+" 10200)
+         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+         sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+         cd ..
 
-    # ================== SUSFS集成 ==================
-    - name: 集成SUSFS
-      if: ${{ inputs.SUSFS_ENABLED }}
-      run: |
-        cd kernel
-        # 应用Realme专用补丁
-        for patch in \
-          fs/squashfs/0001-enable-susfs.patch \
-          drivers/staging/0101-add-susfs-support.patch
-        do
-          curl -sO "https://your-patch-server/$patch" && patch -p1 < $(basename $patch)
-        done
+      - name: Apply SUSFS patches
+        if: github.event.inputs.SUSFS_ENABLED == 'true'
+        run: |
+           cd kernel_src
+           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1
+           git clone https://github.com/TanakaLun/kernel_patches4mksu.git
+           
+           # 应用核心补丁
+           cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+           cp kernel_patches4mksu/mksu_susfs.patch KernelSU/
+           cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch ./
+           
+           # 应用文件修改
+           mkdir -p fs/susfs
+           cp -r susfs4ksu/kernel_patches/fs/* fs/susfs/
+           cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
 
-    # ================== 内核编译 ==================
-    - name: 编译内核
-      run: |
-        cd kernel
-        make -j$(nproc) O=out ARCH=arm64 \
-          CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          CROSS_COMPILE=aarch64-linux-android- \
-          LLVM=1 \
-          LLVM_IAS=1 \
-          Image.gz-dtb
+           # 打补丁
+           cd KernelSU
+           patch -p1 < ../10_enable_susfs_for_ksu.patch || true
+           patch -p1 < ../mksu_susfs.patch || true
+           cd ..
+           patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || true
+           cd kernel_patches4mksu && cp 69_hide_stuff.patch ../
+           cd ..
+           patch -p1 -F 3 < 69_hide_stuff.patch
+           git add -A && git commit -m "Apply SUSFS integration"
 
-        # 验证输出文件
-        IMAGE_PATH="out/arch/arm64/boot/Image.gz-dtb"
-        if [ ! -f "$IMAGE_PATH" ]; then
-          echo "::error::内核镜像未生成！"
-          exit 1
-        fi
-        if [ $(stat -c%s "$IMAGE_PATH") -lt 20971520 ]; then  # 20MB校验
-          echo "::error::镜像大小异常！"
-          exit 1
-        fi
+      - name: Build kernel
+        run: |
+         cd kernel_src
+         make O=out ARCH=arm64 defconfig
+         make -j$(nproc) O=out ARCH=arm64 \
+           CROSS_COMPILE=aarch64-linux-gnu- \
+           CC="aarch64-linux-gnu-gcc" \
+           CLANG_TRIPLE="aarch64-linux-gnu-"
+         
+      - name: Package AnyKernel3
+        run: |
+         git clone https://github.com/Kernel-SU/AnyKernel3
+         rm -rf AnyKernel3/.git
+         cp kernel_src/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+         cd AnyKernel3 && sed -i "s/device.name=.*/device.name=Realme GT Neo6/" anykernel.sh
 
-    # ================== 镜像打包 ==================
-    - name: 生成刷机包
-      run: |
-        cd kernel
-        # 使用高通专用参数
-        python3 scripts/mkbootimg.py \
-          --kernel out/arch/arm64/boot/Image.gz-dtb \
-          --ramdisk ../initramfs.cpio.gz \
-          --base 0x80080000 \
-          --pagesize 4096 \
-          --cmdline 'console=ttyMSM0,115200n8 androidboot.selinux=permissive' \
-          --dtb out/arch/arm64/boot/dts/qcom/sm8635-realme-neo6.dtb \
-          -o boot.img
-        
-        # 生成SHA256校验
-        sha256sum boot.img > boot.img.sha256
-
-    # ================== 产物上传 ==================
-    - name: 上传构建结果
-      uses: actions/upload-artifact@v4
-      with:
-        name: neo6-kernel-$(date +%Y%m%d)
-        path: |
-          kernel/boot.img
-          kernel/boot.img.sha256
-        retention-days: 3
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+         name: RealmeGTNeo6_Kernel_${{ env.KSUVER }}
+         path: AnyKernel3/*
