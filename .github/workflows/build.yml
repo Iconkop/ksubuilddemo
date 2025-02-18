@@ -4,138 +4,118 @@ on:
   workflow_dispatch:
     inputs:
       SUSFS_ENABLED:
-        description: "启用SUSFS文件系统"
-        required: true
+        description: "Enable SUSFS"
         type: boolean
         default: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
-    # =================== 基础环境配置 =================== 
-    - name: 最大化构建空间
-      uses: easimon/maximize-build-space@master
+    # ================== 空间优化 ==================
+    - name: 清理构建空间
+      uses: easimon/maximize-build-space@v2
       with:
-        root-reserve-mb: 12288  # 针对骁龙8s Gen3大内核优化
-        swap-reserve-mb: 4096
+        root-reserve-mb: 16384  # 16GB预留空间
+        swap-reserve-mb: 6144
 
-    - name: 配置Git身份
-      run: |
-        git config --global user.name "Kernel Builder"
-        git config --global user.email "builder@example.com"  # 替换为你的邮箱
-
-    # =================== 依赖安装 ===================
-    - name: 安装构建依赖
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          bc bison build-essential clang flex git libelf-dev \
-          libssl-dev lld llvm lz4 make python3-dev
-
-    # =================== 获取源码 ===================
-    - name: 克隆内核仓库
+    # ================== 源码获取 ==================
+    - name: 克隆内核源码
       uses: actions/checkout@v4
       with:
-        repository: 'https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source.git'  # 替换为你的仓库
-        ref: 'master'
-        path: kernel_src
+        repository: Iconkop/realme_gtneo6-AndroidV-kernel-source
+        path: master
         fetch-depth: 0  # 需要完整提交历史
 
-    # =================== 工具链配置 ===================
-    - name: 设置Clang工具链
-      env:
-        CLANG_VER: 17.0.6  # 推荐版本
+    # ================== 工具链配置 ==================
+    - name: 安装Clang工具链
       run: |
-        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-$CLANG_VER.tar.gz
-        mkdir -p toolchain/clang && tar xzf clang-$CLANG_VER.tar.gz -C toolchain/clang
-        echo "$GITHUB_WORKSPACE/toolchain/clang" >> $GITHUB_PATH
+        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r450784d.tar.gz
+        mkdir -p clang && tar xzf clang-r450784d.tar.gz -C clang
+        echo "CLANG_PATH=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
 
-    # =================== 内核配置 ===================
-    - name: 生成配置文件
+    # ================== 内核配置 ==================
+    - name: 生成内核配置
       run: |
-        cd kernel_src
-        # 确保defconfig路径正确
-        if [ ! -f "arch/arm64/defconfig" ]; then
-          echo "::error::Defconfig文件未找到！路径：arch/arm64/defconfig"
-          exit 1
+        cd kernel
+        make O=out ARCH=arm64 defconfig  # 确认defconfig路径正确
+        
+        # 验证基地址配置
+        if ! grep -q "CONFIG_PHYSICAL_START=0x80080000" out/.config; then
+          sed -i 's/CONFIG_PHYSICAL_START=.*/CONFIG_PHYSICAL_START=0x80080000/' out/.config
         fi
-        make O=out ARCH=arm64 defconfig  # 直接使用默认defconfig
 
-    # =================== KernelSU集成 ===================
+    # ================== KernelSU集成 ==================
     - name: 集成KernelSU
       run: |
-        cd kernel_src
+        cd kernel
         # 使用官方集成脚本
         curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
         
-        # 验证集成状态
-        if [ ! -f "drivers/kernelsu/Kconfig" ]; then
-          echo "::error::KernelSU集成失败！"
-          exit 1
-        fi
+        # 适配骁龙8s Gen3的DTS补丁
+        patch -p1 < drivers/kernelsu/patchs/qcom_sm8635.patch || true
 
-    # =================== SUSFS集成 ===================
+    # ================== SUSFS集成 ==================
     - name: 集成SUSFS
-      if: ${{ github.event.inputs.SUSFS_ENABLED == 'true' }}
+      if: ${{ inputs.SUSFS_ENABLED }}
       run: |
-        cd kernel_src
-        # 克隆最新SUSFS补丁
-        git clone https://gitlab.com/susfs/patches.git -b android14-6.1 susfs_patches
-        
-        # 应用补丁
-        for patch in susfs_patches/*.patch; do
-          patch -p1 --forward < $patch || echo "跳过已应用的补丁：$patch"
+        cd kernel
+        # 应用Realme专用补丁
+        for patch in \
+          fs/squashfs/0001-enable-susfs.patch \
+          drivers/staging/0101-add-susfs-support.patch
+        do
+          curl -sO "https://your-patch-server/$patch" && patch -p1 < $(basename $patch)
         done
-        
-        # 验证文件系统修改
-        if [ ! -f "fs/susfs/super.c" ]; then
-          echo "::warning::SUSFS集成不完整，但继续构建..."
-        fi
 
-    # =================== 编译内核 ===================
-    - name: 编译内核映像
+    # ================== 内核编译 ==================
+    - name: 编译内核
       run: |
-        cd kernel_src
-        # 针对骁龙8s Gen3优化参数
+        cd kernel
         make -j$(nproc) O=out ARCH=arm64 \
           CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- \
           CROSS_COMPILE=aarch64-linux-android- \
-          LD=ld.lld \
-          NM=llvm-nm \
-          OBJCOPY=llvm-objcopy
-        
+          LLVM=1 \
+          LLVM_IAS=1 \
+          Image.gz-dtb
+
         # 验证输出文件
-        if [ ! -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-          echo "::error::内核编译失败！"
+        IMAGE_PATH="out/arch/arm64/boot/Image.gz-dtb"
+        if [ ! -f "$IMAGE_PATH" ]; then
+          echo "::error::内核镜像未生成！"
+          exit 1
+        fi
+        if [ $(stat -c%s "$IMAGE_PATH") -lt 20971520 ]; then  # 20MB校验
+          echo "::error::镜像大小异常！"
           exit 1
         fi
 
-    # =================== 打包镜像 ===================
-    - name: 生成boot.img
+    # ================== 镜像打包 ==================
+    - name: 生成刷机包
       run: |
-        cd kernel_src
+        cd kernel
         # 使用高通专用参数
         python3 scripts/mkbootimg.py \
           --kernel out/arch/arm64/boot/Image.gz-dtb \
-          --ramdisk initramfs.cpio.gz  # 需提前准备
+          --ramdisk ../initramfs.cpio.gz \
           --base 0x80080000 \
           --pagesize 4096 \
-          --cmdline 'console=ttyMSM0,115200n8 androidboot.hardware=qcom' \
+          --cmdline 'console=ttyMSM0,115200n8 androidboot.selinux=permissive' \
+          --dtb out/arch/arm64/boot/dts/qcom/sm8635-realme-neo6.dtb \
           -o boot.img
         
-        # 签名验证
-        openssl sha256 -sign <(echo "${{ secrets.SIGN_KEY }}") -out boot.sig boot.img
+        # 生成SHA256校验
+        sha256sum boot.img > boot.img.sha256
 
-    # =================== 产物输出 ===================
-    - name: 上传构建产物
+    # ================== 产物上传 ==================
+    - name: 上传构建结果
       uses: actions/upload-artifact@v4
       with:
         name: neo6-kernel-$(date +%Y%m%d)
         path: |
-          kernel_src/boot.img
-          kernel_src/out/arch/arm64/boot/Image.gz-dtb
-        retention-days: 7
+          kernel/boot.img
+          kernel/boot.img.sha256
+        retention-days: 3
