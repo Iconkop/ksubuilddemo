@@ -1,4 +1,3 @@
- 
 name: Realme GT Neo6 Kernel Builder
 
 on:
@@ -25,8 +24,8 @@ jobs:
 
     - name: 配置Git身份
       run: |
-        git config --global user.name "iconkop"
-        git config --global user.email "shenzhan22@gmail.com"  # 替换为你的邮箱
+        git config --global user.name "Kernel Builder"
+        git config --global user.email "builder@example.com"  # 替换为你的邮箱
 
     # =================== 依赖安装 ===================
     - name: 安装构建依赖
@@ -70,7 +69,7 @@ jobs:
       run: |
         cd kernel_src
         # 使用官方集成脚本
-        curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/main/kernel/setup.sh" | bash -
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
         
         # 验证集成状态
         if [ ! -f "drivers/kernelsu/Kconfig" ]; then
@@ -140,4 +139,3 @@ jobs:
           kernel_src/boot.img
           kernel_src/out/arch/arm64/boot/Image.gz-dtb
         retention-days: 7
- 
