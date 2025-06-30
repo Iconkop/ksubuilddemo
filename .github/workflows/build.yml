@@ -1,114 +1,105 @@
-name: Build MKSU-SUSFS For Realme GT Neo6 (SM8650)
+# GitHub Action for building Realme GT Neo 6 Kernel with SukiSU-Ultra and packaging with AnyKernel3.
+name: Build Kernel with SukiSU-Ultra (AK3)
+
 on:
   workflow_dispatch:
-   inputs:
-      CPUD:
-        description: "处理器代号"
-        required: true
-        default: 'sm8650'
-      SUSFS_ENABLED:
-        description: "添加 SUSFS"
-        required: true
-        type: boolean
-        default: true
+
 jobs:
   build:
+    name: Build and Package Kernel
     runs-on: ubuntu-latest
-    env:
-      ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-gnu-
-    
+
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          echo "Installing necessary build dependencies..."
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git cpio libncurses5-dev libssl-dev bc flex \
+            bison libelf-dev rsync python3 zip
+
+      - name: Download Toolchain and Sources
+        run: |
+          echo "Cloning AOSP Clang toolchain..."
+          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 clang-toolchain
           
-      - name: Configure Git
-        run: |
-         git config --global user.name "build"
-         git config --global user.email "liw378721@gmail.com"
+          echo "Cloning Kernel source..."
+          git clone --depth=1 https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source.git kernel
+          
+          echo "Cloning Vendor source..."
+          mkdir -p kernel/vendor
+          git clone --depth=1 https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-vendor-source.git kernel/vendor/realme
 
-      - name: Install dependencies
+      - name: Configure and Integrate SukiSU-Ultra
         run: |
-         sudo apt update && sudo apt upgrade -y
-         sudo apt install -y python3 git curl build-essential flex bison libssl-dev libelf-dev
-         sudo apt install -y gcc-aarch64-linux-gnu
+          cd kernel
 
-      - name: Clone kernel source
+          echo "Enabling KernelSU in the defconfig (required by setup script)..."
+          # The SukiSU-Ultra setup script requires CONFIG_KSU=y to be set beforehand.
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/pineapple_GKI.config
+          echo "Configuration updated:"
+          tail -n 3 arch/arm64/configs/vendor/pineapple_GKI.config
+          
+          echo "Running SukiSU-Ultra setup script..."
+          # The user-provided command to integrate the susfs-main branch of SukiSU-Ultra
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+
+      - name: Set Environment Variables
         run: |
-         git clone --depth=1 --branch=master \
-           https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source.git kernel_src
+          echo "Setting up build environment variables..."
+          CLANG_PATH=$GITHUB_WORKSPACE/clang-toolchain
+          CLANG_VERSION=$(ls -d $CLANG_PATH/clang-r* | head -n 1)
+          
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "PATH=$CLANG_VERSION/bin:$PATH" >> $GITHUB_ENV
+          
+          echo "Toolchain Path: $CLANG_VERSION"
 
-      - name: Clean kernel source
+      - name: Start Kernel Compilation
         run: |
-         cd kernel_src
-         make clean && make mrproper
-         find . -name "abi_gki_protected_exports_*" -delete || echo "No protected exports!"
-         sed -i 's/ -dirty//g' scripts/setlocalversion
+          echo "Starting GKI kernel compilation..."
+          cd kernel
+          LTO=thin ./build/build.sh
 
-      - name: Set up MKSU
+      - name: Package with AnyKernel3
         run: |
-         cd kernel_src
-         curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/refs/heads/main/kernel/setup.sh" | bash -
-         cd KernelSU
-         git revert -m 1 $(git log --grep="remove devpts hook" --pretty=format:"%h") -n || echo "Revert skipped"
-         KSU_VERSION=$(expr $(git rev-list --count HEAD) "+" 10200)
-         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-         sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
-         cd ..
+          echo "Cloning AnyKernel3 template..."
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          
+          echo "Copying compiled boot.img to AnyKernel3 directory..."
+          # The compiled GKI boot.img is the only artifact we need
+          COMPILED_BOOT_IMG=$GITHUB_WORKSPACE/kernel/out/android14-5.15/dist/boot.img
+          if [ -f "$COMPILED_BOOT_IMG" ]; then
+            cp "$COMPILED_BOOT_IMG" "$GITHUB_WORKSPACE/AnyKernel3/boot.img"
+          else
+            echo "Error: Compiled boot.img not found!"
+            exit 1
+          fi
+          
+          echo "Customizing AnyKernel3 script..."
+          cd AnyKernel3
+          # Set kernel information and device compatibility
+          sed -i 's/kernel.string=.*/kernel.string=MyKernel for Realme GT Neo 6 by ${{ github.actor }}/g' anykernel.sh
+          sed -i 's/device.name1=.*/device.name1=RMX3852/g' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=pineapple/g' anykernel.sh
+          # Since it's a modern GKI device, ensure it's treated as a slot device
+          sed -i 's/is_slot_device=.*/is_slot_device=1/g' anykernel.sh
 
-      - name: Apply SUSFS patches
-        if: github.event.inputs.SUSFS_ENABLED == 'true'
-        run: |
-           cd kernel_src
-           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1
-           git clone https://github.com/TanakaLun/kernel_patches4mksu.git
-           
-           # 应用核心补丁
-           cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
-           cp kernel_patches4mksu/mksu_susfs.patch KernelSU/
-           cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch ./
-           
-           # 应用文件修改
-           mkdir -p fs/susfs
-           cp -r susfs4ksu/kernel_patches/fs/* fs/susfs/
-           cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
+          echo "Creating flashable zip package..."
+          # The file will be named with the current date for uniqueness
+          ZIP_NAME="AK3-SukiSU-GTNeo6-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../$ZIP_NAME" * -x ".git*" "LICENSE" "README.md"
+          
+          # Pass the final zip name to the next step
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
-           # 打补丁
-           cd KernelSU
-           patch -p1 < ../10_enable_susfs_for_ksu.patch || true
-           patch -p1 < ../mksu_susfs.patch || true
-           cd ..
-           patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || true
-           cd kernel_patches4mksu && cp 69_hide_stuff.patch ../
-           cd ..
-           patch -p1 -F 3 < 69_hide_stuff.patch
-           git add -A && git commit -m "Apply SUSFS integration"
-
-      - name: Build kernel
-        run: |
-         cd kernel_src
-         make O=out ARCH=arm64 defconfig
-         make -j$(nproc) O=out ARCH=arm64 \
-           CROSS_COMPILE=aarch64-linux-gnu- \
-           CC="aarch64-linux-gnu-gcc" \
-           CLANG_TRIPLE="aarch64-linux-gnu-"
-         
-      - name: Package AnyKernel3
-        run: |
-         git clone https://github.com/Kernel-SU/AnyKernel3
-         rm -rf AnyKernel3/.git
-         cp kernel_src/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-         cd AnyKernel3 && sed -i "s/device.name=.*/device.name=Realme GT Neo6/" anykernel.sh
-
-      - name: Upload artifact
+      - name: Upload Flashable Zip Artifact
         uses: actions/upload-artifact@v4
         with:
-         name: RealmeGTNeo6_Kernel_${{ env.KSUVER }}
-         path: AnyKernel3/*
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
