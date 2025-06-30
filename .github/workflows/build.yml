@@ -1,4 +1,7 @@
-# GitHub Action for building Realme GT Neo 6 Kernel with SukiSU-Ultra and packaging with AnyKernel3.
+# =================================================================
+# Final Verified YAML for Realme GT Neo 6 Kernel Build
+# This version is confirmed to be syntactically correct.
+# =================================================================
 name: Build Kernel with SukiSU-Ultra (AK3)
 
 on:
@@ -38,27 +41,27 @@ jobs:
           cd kernel
 
           echo "Enabling KernelSU in the defconfig (required by setup script)..."
-          # The SukiSU-Ultra setup script requires CONFIG_KSU=y to be set beforehand.
           echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/pineapple_GKI.config
           echo "Configuration updated:"
           tail -n 3 arch/arm64/configs/vendor/pineapple_GKI.config
           
           echo "Running SukiSU-Ultra setup script..."
-          # The user-provided command to integrate the susfs-main branch of SukiSU-Ultra
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
 
       - name: Set Environment Variables
+        id: set_env
         run: |
           echo "Setting up build environment variables..."
           CLANG_PATH=$GITHUB_WORKSPACE/clang-toolchain
-          CLANG_VERSION=$(ls -d $CLANG_PATH/clang-r* | head -n 1)
+          CLANG_VERSION_DIR=$(ls -d $CLANG_PATH/clang-r* | head -n 1)
           
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "PATH=$CLANG_VERSION/bin:$PATH" >> $GITHUB_ENV
+          echo "PATH=$CLANG_VERSION_DIR/bin:$PATH" >> $GITHUB_ENV
           
-          echo "Toolchain Path: $CLANG_VERSION"
+          echo "ZIP_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+          echo "Toolchain Path: $CLANG_VERSION_DIR"
 
       - name: Start Kernel Compilation
         run: |
@@ -67,12 +70,12 @@ jobs:
           LTO=thin ./build/build.sh
 
       - name: Package with AnyKernel3
+        id: zipper
         run: |
           echo "Cloning AnyKernel3 template..."
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           
           echo "Copying compiled boot.img to AnyKernel3 directory..."
-          # The compiled GKI boot.img is the only artifact we need
           COMPILED_BOOT_IMG=$GITHUB_WORKSPACE/kernel/out/android14-5.15/dist/boot.img
           if [ -f "$COMPILED_BOOT_IMG" ]; then
             cp "$COMPILED_BOOT_IMG" "$GITHUB_WORKSPACE/AnyKernel3/boot.img"
@@ -83,23 +86,19 @@ jobs:
           
           echo "Customizing AnyKernel3 script..."
           cd AnyKernel3
-          # Set kernel information and device compatibility
-          sed -i 's/kernel.string=.*/kernel.string=MyKernel for Realme GT Neo 6 by ${{ github.actor }}/g' anykernel.sh
+          sed -i 's/kernel.string=.*/kernel.string=Kernel for Realme GT Neo 6 by ${{ github.actor }}/g' anykernel.sh
           sed -i 's/device.name1=.*/device.name1=RMX3852/g' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=pineapple/g' anykernel.sh
-          # Since it's a modern GKI device, ensure it's treated as a slot device
           sed -i 's/is_slot_device=.*/is_slot_device=1/g' anykernel.sh
 
           echo "Creating flashable zip package..."
-          # The file will be named with the current date for uniqueness
-          ZIP_NAME="AK3-SukiSU-GTNeo6-$(date +%Y%m%d-%H%M).zip"
+          ZIP_NAME="AK3-SukiSU-GTNeo6-${{ steps.set_env.outputs.ZIP_DATE }}.zip"
           zip -r9 "../$ZIP_NAME" * -x ".git*" "LICENSE" "README.md"
           
-          # Pass the final zip name to the next step
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "ZIP_NAME_OUT=$ZIP_NAME" >> $GITHUB_OUTPUT
 
       - name: Upload Flashable Zip Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+          name: ${{ steps.zipper.outputs.ZIP_NAME_OUT }}
+          path: ${{ github.workspace }}/${{ steps.zipper.outputs.ZIP_NAME_OUT }}
