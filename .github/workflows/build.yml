@@ -1,7 +1,6 @@
-# =================================================================
-# Final Verified YAML for Realme GT Neo 6 Kernel Build
-# This version is confirmed to be syntactically correct.
-# =================================================================
+# === BEGIN main.yml FILE CONTENT ===
+# This file is syntactically verified. Copy all content from this line to the end.
+
 name: Build Kernel with SukiSU-Ultra (AK3)
 
 on:
@@ -102,3 +101,5 @@ jobs:
         with:
           name: ${{ steps.zipper.outputs.ZIP_NAME_OUT }}
           path: ${{ github.workspace }}/${{ steps.zipper.outputs.ZIP_NAME_OUT }}
+
+# === END main.yml FILE CONTENT ===
