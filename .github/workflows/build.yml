@@ -1,95 +1,138 @@
-# GitHub Actions 工作流名称
-name: Build Kernel with SukiSU-Ultra
+name: Build SukiSU Ultra Realme GTNeo6
 
-# 工作流触发条件：允许手动触发
 on:
   workflow_dispatch:
+    inputs:
+      CPU:
+        type: choice
+        description: "处理器系列"
+        required: true
+        options:
+          - master
+      FEIL:
+        type: choice
+        description: "配置文件"
+        required: true
+        options:
+          - GTneo6
+      CPUD:
+        type: choice
+        description: "处理器代号"
+        required: true
+        options:
+          - pineapple
+      ANDROID_VERSION:
+        type: choice
+        description: "安卓版本"
+        required: true
+        options:
+          - android14
+      KERNEL_VERSION:
+        type: choice
+        description: "内核版本"
+        required: true
+        options:
+          - 6.1
+      BUILD_METHOD:
+        type: choice
+        description: "编译方式"
+        required: true
+        default: gki
+        options:
+          - gki
+          - perf
+      VFS:
+        type: boolean
+        description: "是否启用手动钩子？"
+        required: true
+        default: true
+      KPM:
+        type: boolean
+        description: "是否启用KPM支持？"
+        required: true
+        default: true
+      ZRAM:
+        type: boolean
+        description: "是否启用添加ZRAM算法支持？"
+        required: true
+        default: false
 
-# 定义工作流中的任务
 jobs:
-  build:
-    # 任务名称
-    name: Build Kernel for realme GT Neo6
-    # 运行任务的虚拟机环境
-    runs-on: ubuntu-22.04
+  build_kernel:
+    runs-on: ubuntu-latest
 
-    # 任务执行的步骤
     steps:
-      # 步骤1：检出当前仓库代码（如果需要访问仓库内的脚本文件）
-      - name: Checkout Workflow Repo
-        uses: actions/checkout@v4
-
-      # 步骤2：安装编译所需的依赖包
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential cpio curl flex git kmod libssl-dev libelf-dev squashfs-tools zip patch python3-pip
-
-      # 步骤3：克隆 Proton Clang 编译器工具链
-      - name: Clone Compiler Toolchain
-        run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang-toolchain
-
-      # 步骤4：设置编译环境变量
-      - name: Set Environment Variables
-        run: |
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_USER=GitHubActions" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_HOST=CI" >> $GITHUB_ENV
-          echo "CC=clang" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "LD=ld.lld" >> $GITHUB_ENV
-          echo "AR=llvm-ar" >> $GITHUB_ENV
-          echo "NM=llvm-nm" >> $GITHUB_ENV
-          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
-          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
-          echo "STRIP=llvm-strip" >> $GITHUB_ENV
-          echo "PATH=$GITHUB_WORKSPACE/clang-toolchain/bin:$PATH" >> $GITHUB_ENV
-
-      # 步骤5：检出内核源代码（使用 sukisu 分支）
-      - name: Checkout Kernel Source (sukisu branch)
-        uses: actions/checkout@v4
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
         with:
-          repository: realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source
-          ref: master
-          path: kernel-source
-          fetch-depth: 1
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
 
-      # 步骤6：集成 SukiSU-Ultra (susfs)
-      # 切换到内核源码目录并执行官方安装脚本
-      - name: Integrate SukiSU-Ultra (susfs)
-        working-directory: ./kernel-source
+      - name: Clone Kernel Repository
         run: |
-          echo "✅ Integrating SukiSU-Ultra..."
+          git clone https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source --depth=1 --branch master kernel_workspace
+          cd kernel_workspace
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y python3 git curl build-essential flex bison libssl-dev libelf-dev
+
+      - name: Show selected inputs
+        run: |
+          echo "Selected CPU: ${{ github.event.inputs.CPU }}"
+          echo "Selected FEIL: ${{ github.event.inputs.FEIL }}"
+          echo "Selected CPUD: ${{ github.event.inputs.CPUD }}"
+          echo "Selected ANDROID_VERSION: ${{ github.event.inputs.ANDROID_VERSION }}"
+          echo "Selected KERNEL_VERSION: ${{ github.event.inputs.KERNEL_VERSION }}"
+          echo "Selected BUILD_METHOD: ${{ github.event.inputs.BUILD_METHOD }}"
+          echo "Selected ZRAM: ${{ github.event.inputs.ZRAM }}"
+          echo "Selected VFS: ${{ github.event.inputs.VFS }}"
+          echo "Selected KPM: ${{ github.event.inputs.KPM }}"
+
+      - name: Add KernelSU-SukiSU Ultra
+        run: |
+          cd kernel_workspace
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-          echo "✅ Integration complete."
 
-      # 步骤7：开始编译内核
-      - name: Build Kernel
-        working-directory: ./kernel-source
+      - name: Configure Kernel
         run: |
-          echo "✅ Starting kernel build..."
-          # 配置内核：请将 'vendor/sm8650_defconfig' 替换为您设备实际的 defconfig 文件
-          make O=out vendor/pineapple_GKI.config
-          
-          # 执行编译：使用所有可用的CPU核心
-          make O=out -j$(nproc --all)
-          echo "✅ Build finished."
+          cd kernel_workspace
+          CONFIG_FILE="./arch/arm64/configs/defconfig"
+          echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
+          fi
+          if [ "${{ github.event.inputs.KPM }}" = "true" ]; then
+            echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+          fi
+          if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
+            echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
+            echo "CONFIG_ZRAM_DEF_COMP_LZ4=y" >> "$CONFIG_FILE"
+          fi
+          echo "配置完成"
 
-      # 步骤8：打包编译产物
-      - name: Package Artifacts
+      - name: Compilation
         run: |
-          echo "📦 Packaging the kernel image..."
-          cd kernel-source/out/arch/arm64/boot/
-          # 将内核镜像文件打包成zip
-          zip -r Kernel-realme_gtneo6-$(date +%Y%m%d).zip Image
-          echo "📦 Packaging complete."
+          cd kernel_workspace
+          make defconfig
+          make -j$(nproc) Image.gz modules
 
-      # 步骤9：上传编译产物
-      - name: Upload Artifacts
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+          cp kernel_workspace/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
+          cp -r kernel_workspace/out/modules AnyKernel3/modules/
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-Image
-          # 上传打包好的zip文件
-          path: kernel-source/out/arch/arm64/boot/*.zip
+          name: Realme_GTNeo6_${{ github.event.inputs.FEIL }}
+          path: AnyKernel3/
