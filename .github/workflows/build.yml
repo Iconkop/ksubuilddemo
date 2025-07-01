@@ -78,7 +78,7 @@ jobs:
         run: |
           # 移除内核版本号后面可能出现的 "-dirty" 标记，使版本号更干净
           sed -i 's/ -dirty//g' scripts/setlocalversion
-          sed -i '$s/echo "$res"/echo "$res" | sed "s/-dirty//g"/' scripts/setlocalversion
+          sed -i '$s#echo "$res"#echo "$res" | sed "s/-dirty//g"#' scripts/setlocalversion
           # 从 Makefile 文件中动态提取内核的主版本和次版本号
           VERSION=$(grep -oP 'VERSION = \K\d+' Makefile)
           PATCHLEVEL=$(grep -oP 'PATCHLEVEL = \K\d+' Makefile)
