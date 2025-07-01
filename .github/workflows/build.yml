@@ -70,7 +70,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source
-          ref: main
+          ref: master
           path: kernel-source # 将源码下载到 kernel-source 目录
       - name: Clean Version String and Detect Version
         id: version_detect # 为此步骤设置ID
