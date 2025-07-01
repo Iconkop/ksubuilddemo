@@ -71,7 +71,7 @@ jobs:
         run: |
           echo "✅ Starting kernel build..."
           # 配置内核：请将 'vendor/sm8650_defconfig' 替换为您设备实际的 defconfig 文件
-          make O=out vendor/pineapple_GKI.config
+          make vendor/pineapple_GKI.config O=out
           
           # 执行编译：使用所有可用的CPU核心
           make O=out -j$(nproc --all)
