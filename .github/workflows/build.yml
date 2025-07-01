@@ -1,103 +1,250 @@
-# =================================================================
-# Final & Robust YAML for Realme GT Neo 6 Kernel Build
-# Fixes "No such file or directory" error by using absolute paths and &&.
-# =================================================================
-name: Build Kernel with SukiSU-Ultra (AK3)
+# .github/workflows/build-realme-gtneo6-kernel.yml
 
+# 工作流名称
+name: Build realme GT Neo6 Kernel with SukiSU
+
+# 工作流触发方式：手动触发
 on:
   workflow_dispatch:
+    inputs:
+      # 定义手动触发时的输入参数
+      ANDROID_VERSION:
+        description: '安卓主版本 (用于匹配susfs补丁)'
+        required: true
+        type: string
+        default: 'android14'
+      KPM_PATCH:
+        description: '是否启用 KPM 编译后修补 (Enable KPM post-patching)'
+        required: true
+        type: choice
+        options:
+          - 'Yes'
+          - 'No'
+        default: 'Yes'
+      LZ4KD_PATCH:
+        description: '【高风险】是否启用 lz4kd 压缩算法补丁 (可能不兼容)'
+        required: true
+        type: choice
+        options:
+          - 'Yes'
+          - 'No'
+        default: 'No'
 
 jobs:
   build:
-    name: Build and Package Kernel
+    # 任务名称，会显示在 GitHub Actions 页面
+    name: Build Kernel for realme GT Neo6 | Android ${{ github.event.inputs.ANDROID_VERSION }}
+    # 运行环境：最新的 Ubuntu 系统
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Dependencies
+      # 步骤 1: 准备环境，安装所有必要的依赖软件包
+      - name: Prepare Environment and Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git cpio libncurses5-dev libssl-dev bc flex \
-            bison libelf-dev rsync python3 zip
+          sudo apt-get install -y bc bison build-essential cpio curl flex git kmod libssl-dev libelf-dev squashfs-tools zip patch python3-pip
 
-      - name: Download Toolchain and Sources
-        run: |
-          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 clang-toolchain
-          git clone --depth=1 https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source.git kernel
-          mkdir -p kernel/vendor
-          git clone --depth=1 https://github.com/realme-kernel-opensource/realme_gtneo6-AndroidV-vendor-source.git kernel/vendor/realme
+      # 步骤 2: 克隆 Proton Clang 编译器工具链
+      - name: Clone Clang Toolchain
+        run: git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang-toolchain
 
-      - name: Configure and Integrate SukiSU-Ultra
-        # This step runs inside the kernel directory
-        working-directory: ${{ github.workspace }}/kernel
+      # 步骤 3: 设置编译所需的环境变量
+      - name: Set up Build Environment Variables
         run: |
-          echo "Enabling KernelSU in the defconfig..."
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/pineapple_GKI.config
-          echo "Configuration updated:"
-          tail -n 3 arch/arm64/configs/vendor/pineapple_GKI.config
-          
-          echo "Running SukiSU-Ultra setup script..."
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-
-      - name: Set Environment Variables
-        id: set_env
-        run: |
-          CLANG_PATH=$GITHUB_WORKSPACE/clang-toolchain
-          CLANG_VERSION_DIR=$(ls -d $CLANG_PATH/clang-r* | head -n 1)
-          
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "PATH=$CLANG_VERSION_DIR/bin:$PATH" >> $GITHUB_ENV
-          
-          echo "ZIP_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+          echo "KBUILD_BUILD_USER=GitHubActions" >> $GITHUB_ENV # 自定义编译用户名
+          echo "KBUILD_BUILD_HOST=CI" >> $GITHUB_ENV            # 自定义编译主机名
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "NM=llvm-nm" >> $GITHUB_ENV
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          echo "PATH=$GITHUB_WORKSPACE/clang-toolchain/bin:$PATH" >> $GITHUB_ENV
 
-      - name: Start Kernel Compilation
+      # 步骤 4: 检出内核源码，并自动检测内核版本
+      - name: Checkout Source and Detect Kernel Version
+        id: source_prep # 为此步骤设置ID，方便后续引用其输出
+        uses: actions/checkout@v4
+        with:
+          repository: realme-kernel-opensource/realme_gtneo6-AndroidV-kernel-source
+          ref: main
+          path: kernel-source # 将源码下载到 kernel-source 目录
+      - name: Clean Version String and Detect Version
+        id: version_detect # 为此步骤设置ID
+        working-directory: ./kernel-source # 进入内核源码目录执行
         run: |
-          echo "Workspace contents:"
-          ls -l $GITHUB_WORKSPACE
+          # 移除内核版本号后面可能出现的 "-dirty" 标记，使版本号更干净
+          sed -i 's/ -dirty//g' scripts/setlocalversion
+          sed -i '$s/echo "$res"/echo "$res" | sed "s/-dirty//g"/' scripts/setlocalversion
+          # 从 Makefile 文件中动态提取内核的主版本和次版本号
+          VERSION=$(grep -oP 'VERSION = \K\d+' Makefile)
+          PATCHLEVEL=$(grep -oP 'PATCHLEVEL = \K\d+' Makefile)
+          KERNEL_BASE_VERSION="${VERSION}.${PATCHLEVEL}"
+          echo "✅ 成功检测到内核主版本: $KERNEL_BASE_VERSION"
+          # 将检测到的版本号输出，供后续步骤使用
+          echo "kernel_version=${KERNEL_BASE_VERSION}" >> $GITHUB_OUTPUT
 
-          # Navigate into the kernel directory and execute the build.
-          # Using "&&" ensures the build command only runs if "cd" is successful.
-          cd $GITHUB_WORKSPACE/kernel && LTO=thin ./build/build.sh
-
-      - name: Package with AnyKernel3
-        id: zipper
+      # 步骤 5: 集成 SukiSU 和 susfs
+      - name: Integrate SukiSU & susfs with Dynamic Discovery
+        id: integration
+        working-directory: ./kernel-source
         run: |
-          # Use an absolute path for the compiled boot image for robustness
-          COMPILED_BOOT_IMG=$GITHUB_WORKSPACE/kernel/out/android14-5.15/dist/boot.img
+          # --- 1. 集成 SukiSU (KernelSU) 核心 ---
+          echo "INFO: 正在集成 SukiSU (KernelSU)..."
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/setup.sh" | bash -s susfs-main
           
-          echo "Looking for boot image at: $COMPILED_BOOT_IMG"
-          if [ ! -f "$COMPILED_BOOT_IMG" ]; then
-            echo "::error::Compiled boot.img not found!"
-            # List the 'dist' directory contents for debugging
-            echo "Listing contents of the 'dist' directory:"
-            ls -lR $GITHUB_WORKSPACE/kernel/out/android14-5.15/dist
+          # --- 2. 动态发现并匹配最适合的 susfs 补丁分支 (核心智能功能) ---
+          echo "INFO: 正在动态发现最适合的 susfs 补丁分支..."
+          KERNEL_VERSION="${{ steps.version_detect.outputs.kernel_version }}"
+          ANDROID_VERSION="${{ github.event.inputs.ANDROID_VERSION }}"
+          REMOTE_URL="https://gitlab.com/simonpunk/susfs4ksu.git"
+          
+          # 构造最理想的分支名格式
+          IDEAL_BRANCH="gki-${ANDROID_VERSION}-${KERNEL_VERSION}"
+          
+          # 在不克隆仓库的情况下，获取远程所有分支和标签列表
+          REMOTE_REFS=$(git ls-remote --tags --heads $REMOTE_URL)
+          
+          SUSFS_BRANCH=""
+          # 策略一：尝试完美匹配
+          if echo "$REMOTE_REFS" | grep -q "refs/heads/${IDEAL_BRANCH}$"; then
+              SUSFS_BRANCH=$IDEAL_BRANCH
+              echo "✅ 成功! 找到完美匹配的分支: $SUSFS_BRANCH"
+          # 策略二：如果找不到，尝试只匹配内核版本的降级策略
+          elif echo "$REMOTE_REFS" | grep "refs/heads/.*${KERNEL_VERSION}$" | head -n 1 > /dev/null; then
+              SUSFS_BRANCH=$(echo "$REMOTE_REFS" | grep "refs/heads/.*${KERNEL_VERSION}$" | head -n 1 | awk -F'/' '{print $3}')
+              echo "⚠️ 警告: 未找到理想分支 '$IDEAL_BRANCH'。已采用降级策略，找到一个可用的匹配: $SUSFS_BRANCH"
+          else
+              echo "❌ 致命错误: 无法为内核版本 $KERNEL_VERSION 找到任何可用的 susfs 补丁分支。"
+              exit 1
+          fi
+          
+          # 将找到的分支名输出，供后续步骤使用
+          echo "susfs_branch=${SUSFS_BRANCH}" >> $GITHUB_OUTPUT
+
+          # --- 3. 使用找到的分支进行集成 ---
+          echo "INFO: 正在使用分支 '$SUSFS_BRANCH' 进行集成..."
+          git clone $REMOTE_URL --depth=1 -b $SUSFS_BRANCH ../susfs4ksu
+          
+          cp ../susfs4ksu/kernel_patches/fs/* ./fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch"
+          if [ -f "$PATCH_FILE" ]; then
+            cp "$PATCH_FILE" .
+            # 使用 || true 避免因为部分补丁已应用或冲突而导致整个工作流失败
+            patch -p1 < "50_add_susfs_in_${SUSFS_BRANCH}.patch" || true
+          else
+            echo "::warning:: 未找到主要的 susfs 补丁文件 '$PATCH_FILE'。susfs 功能可能无法正常工作。"
+          fi
+
+      # 步骤 6: (可选) 应用高风险的性能补丁
+      - name: Apply Optional High-Risk Patches
+        if: github.event.inputs.LZ4KD_PATCH == 'Yes'
+        working-directory: ./kernel-source
+        run: |
+          echo "::warning:: 正在应用 lz4kd 性能补丁。此补丁可能与您的内核不兼容，有导致编译失败的风险。"
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git --depth=1 ../SukiSU_patch
+          
+          LZ4KD_PATCH_DIR="../SukiSU_patch/other/zram/zram_patch/${{ steps.version_detect.outputs.kernel_version }}"
+          if [ -d "$LZ4KD_PATCH_DIR" ]; then
+            cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./include/linux
+            cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./lib
+            cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./crypto
+            cp "${LZ4KD_PATCH_DIR}/lz4kd.patch" .
+            patch -p1 < lz4kd.patch || true
+          else
+            echo "::error:: 未在 SukiSU_patch 仓库中找到适用于内核 ${{ steps.version_detect.outputs.kernel_version }} 的 lz4kd 补丁。"
+            exit 1
+          fi
+
+      # 步骤 7: 在内核配置文件 defconfig 中启用所有功能
+      - name: Enable Kernel Features in defconfig
+        run: |
+          DEFCONFIG_PATH="kernel-source/vendor/sm8635_defconfig"
+          echo "INFO: 正在修改配置文件: $DEFCONFIG_PATH"
+          
+          # SukiSU & KPM 核心配置
+          echo "CONFIG_KSU=y" >> $DEFCONFIG_PATH
+          echo "CONFIG_KPM=y" >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> $DEFCONFIG_PATH
+
+          # SUSFS 核心配置
+          echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG_PATH
+          # ... 此处可根据需要添加更多 susfs 的 CONFIG_* 选项
+
+          # 根据用户的选择，条件性地启用 lz4kd
+          if [ "${{ github.event.inputs.LZ4KD_PATCH }}" == "Yes" ]; then
+            echo "CONFIG_CRYPTO_LZ4KD=y" >> $DEFCONFIG_PATH
+          fi
+
+      # 步骤 8: 编译内核
+      - name: Compile Kernel
+        working-directory: ./kernel-source
+        run: |
+          # 1. 生成 .config 文件
+          make O=out vendor/sm8635_defconfig
+          # 2. 使用所有可用的 CPU核心进行并行编译
+          make -j$(nproc) O=out
+
+      # 步骤 9: KPM 编译后修补
+      - name: KPM Post-Compilation Patching
+        if: github.event.inputs.KPM_PATCH == 'Yes'
+        run: |
+          echo "INFO: 正在对编译好的内核进行 KPM 修补..."
+          cd kernel-source/out/arch/arm64/boot/
+          # 下载修补工具
+          curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux
+          chmod +x patch_linux
+          # 执行修补
+          ./patch_linux
+          # 如果成功生成了 oImage，则用它替换原有的 Image 文件
+          if [ -f "oImage" ]; then
+            echo "INFO: KPM 修补成功，正在替换内核文件。"
+            mv -f oImage Image
+          else
+            echo "::warning:: KPM 修补后未找到 oImage 文件。将使用原始内核文件进行打包。"
+          fi
+
+      # 步骤 10: 使用 AnyKernel3 将编译产物打包成可刷写的 ZIP 文件
+      - name: Package into Flashable Zip
+        run: |
+          echo "INFO: 正在打包为可刷写的 ZIP..."
+          # 克隆 AnyKernel3 打包工具
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          
+          # --- 健壮的内核产物查找逻辑 ---
+          IMAGE_PATH=""
+          # 在多个常见的输出目录中查找 Image 文件
+          SEARCH_DIRS=("kernel-source/out/arch/arm64/boot/" "kernel-source/out/dist/")
+          for dir in "${SEARCH_DIRS[@]}"; do
+            if [ -f "${dir}Image" ]; then
+              IMAGE_PATH="${dir}Image"
+              echo "INFO: 成功在 '$IMAGE_PATH' 找到编译好的内核 Image 文件。"
+              break
+            fi
+          done
+          # 如果找不到 Image 文件，则报错并停止
+          if [ -z "$IMAGE_PATH" ]; then
+            echo "::error:: 致命错误: 编译后找不到内核 Image 文件！"
             exit 1
           fi
           
-          echo "Cloning AnyKernel3 template..."
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          # 将所有需要的编译产物复制到 AnyKernel3 目录中
+          cp "$IMAGE_PATH" AnyKernel3/Image
+          cp kernel-source/out/arch/arm64/boot/dtbo.img AnyKernel3/
+          cp kernel-source/out/arch/arm64/boot/dts/vendor/qcom/sm8635-realme.dtb AnyKernel3/dtb
           
-          echo "Copying boot image and customizing AnyKernel3..."
-          cp "$COMPILED_BOOT_IMG" "$GITHUB_WORKSPACE/AnyKernel3/boot.img"
+          # 进入 AnyKernel3 目录并执行打包
           cd AnyKernel3
-          sed -i 's/kernel.string=.*/kernel.string=Kernel for Realme GT Neo 6 by ${{ github.actor }}/g' anykernel.sh
-          sed -i 's/device.name1=.*/device.name1=RMX3852/g' anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=pineapple/g' anykernel.sh
-          sed -i 's/is_slot_device=.*/is_slot_device=1/g' anykernel.sh
+          zip -r9 Flashable-Kernel-SukiSU-$(date +%Y%m%d-%H%M).zip * -x ".git*" "README.md"
 
-          echo "Creating flashable zip package..."
-          ZIP_NAME="AK3-SukiSU-GTNeo6-${{ steps.set_env.outputs.ZIP_DATE }}.zip"
-          zip -r9 "../$ZIP_NAME" * -x ".git*" "LICENSE" "README.md"
-          
-          echo "ZIP_NAME_OUT=$ZIP_NAME" >> $GITHUB_OUTPUT
-
-      - name: Upload Flashable Zip Artifact
+      # 步骤 11: 上传编译好的 ZIP 文件作为产物
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.zipper.outputs.ZIP_NAME_OUT }}
-          path: ${{ github.workspace }}/${{ steps.zipper.outputs.ZIP_NAME_OUT }}
+          name: Flashable-Kernel-SukiSU-Zip
+          path: AnyKernel3/*.zip
