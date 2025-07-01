@@ -11,7 +11,7 @@ jobs:
     # 任务名称
     name: Build Kernel for realme GT Neo6
     # 运行任务的虚拟机环境
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     # 任务执行的步骤
     steps:
